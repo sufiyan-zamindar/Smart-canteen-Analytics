@@ -1,0 +1,6 @@
+streamlit>=1.38
+pandas>=2.1
+numpy>=1.26
+xlsxwriter>=3.2
+altair>=5.2
+python-dateutil>=2.8
