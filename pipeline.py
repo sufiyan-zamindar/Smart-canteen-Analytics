@@ -1,16 +1,14 @@
 # pipeline.py
-# Core engine: Pandas -> NumPy -> Excel (in-memory)
+# Pandas -> NumPy -> Excel (in-memory). No matplotlib import.
 
 from io import BytesIO
-from pathlib import Path
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 
-# -------- Phase 0 — Load and normalize --------
+# ---- Phase 0: Load + normalize ----
 def load_data(menu_csv, sales_csv):
-    """Accepts file paths or file-like objects from Streamlit uploads."""
+    """Accepts file paths or file-like objects (Streamlit uploader)."""
     menu = pd.read_csv(menu_csv)
     sales = pd.read_csv(sales_csv)
 
@@ -18,7 +16,7 @@ def load_data(menu_csv, sales_csv):
     menu.columns = [c.strip().lower() for c in menu.columns]
     sales.columns = [c.strip().lower() for c in sales.columns]
 
-    # Schema (matches your real data)
+    # Schema checks aligned with your data
     need_menu = {"item_id", "item_name", "category", "price"}
     need_sales = {"item_id", "quantity", "student_count", "date"}
     miss_m = need_menu - set(menu.columns)
@@ -28,7 +26,7 @@ def load_data(menu_csv, sales_csv):
     if miss_s:
         raise KeyError(f"Sales missing columns: {sorted(miss_s)}")
 
-    # Types / defaults
+    # Types and defaults
     menu["price"] = pd.to_numeric(menu["price"], errors="coerce").fillna(0.0)
     if "unitcost" not in menu.columns:
         menu["unitcost"] = (menu["price"] * 0.60).round(2)
@@ -40,24 +38,26 @@ def load_data(menu_csv, sales_csv):
     return menu, sales
 
 
-# -------- Phase 1 — Pandas tasks --------
+# ---- Phase 1: Pandas tasks ----
 def pandas_phase(menu: pd.DataFrame, sales: pd.DataFrame):
-    df = sales.merge(
-        menu[["item_id", "item_name", "category", "price", "unitcost"]],
-        on="item_id",
-        how="left",
-        validate="many_to_one",
-    ).rename(columns={"item_name": "Item", "category": "Category"})
+    df = (
+        sales.merge(
+            menu[["item_id", "item_name", "category", "price", "unitcost"]],
+            on="item_id",
+            how="left",
+            validate="many_to_one",
+        )
+        .rename(columns={"item_name": "Item", "category": "Category"})
+    )
 
-    # Normalization for plotting and splits
+    # Normalize for consistent charts/tables
     df["date"] = pd.to_datetime(df["date"]).dt.date
     df["Category"] = (
-        df["Category"]
-        .astype(str)
-        .str.strip()
-        .str.replace("_", "-", regex=False)
-        .str.title()
-        .replace({"Non-Veg": "Non-veg"})
+        df["Category"].astype(str).strip().replace("_", "-", regex=False).title()
+        if hasattr(str, "title") else df["Category"]
+    )
+    df["Category"] = (
+        df["Category"].replace({"Non-Veg": "Non-veg"})
     )
 
     # Financials
@@ -101,7 +101,7 @@ def pandas_phase(menu: pd.DataFrame, sales: pd.DataFrame):
     return df, daily, vnv, top5
 
 
-# -------- Phase 2 — NumPy tasks --------
+# ---- Phase 2: NumPy tasks ----
 def numpy_phase(daily: pd.DataFrame):
     rev = daily["Revenue"].to_numpy()
     students = daily["UniqueStudents"].replace(0, np.nan).to_numpy()
@@ -117,12 +117,8 @@ def numpy_phase(daily: pd.DataFrame):
     return daily
 
 
-# -------- Phase 3 — Excel + charts (in-memory) --------
-def build_excel_and_charts(df, daily, vnv, top5):
-    """
-    Returns: excel_bytes, daily_revenue_png_bytes, vnv_png_bytes
-    """
-    # Excel in memory
+# ---- Phase 3: Excel in memory (no plotting here) ----
+def build_excel(df, daily, vnv, top5) -> bytes:
     xbuf = BytesIO()
     with pd.ExcelWriter(xbuf, engine="xlsxwriter") as w:
         df.to_excel(w, index=False, sheet_name="Full_Joined")
@@ -142,58 +138,19 @@ def build_excel_and_charts(df, daily, vnv, top5):
             )
             item_breakdown.to_excel(w, index=False, sheet_name=sheet, startrow=5)
     xbuf.seek(0)
-
-    # Charts in memory
-    daily_png, vnv_png = None, None
-
-    if len(daily) > 0:
-        # Robust plot for 1–2 days as bars, else line
-        dsorted = daily.sort_values("Date")
-        fig1, ax1 = plt.subplots()
-        if len(dsorted) <= 2:
-            ax1.bar(dsorted["Date"].astype(str), dsorted["Revenue"])
-        else:
-            ax1.plot(pd.to_datetime(dsorted["Date"]), dsorted["Revenue"], marker="o", linewidth=2)
-        ax1.set_title("Daily Revenue")
-        ax1.set_xlabel("Date"); ax1.set_ylabel("Revenue")
-        p1 = BytesIO(); plt.savefig(p1, format="png", bbox_inches="tight"); plt.close(fig1)
-        p1.seek(0); daily_png = p1.read()
-
-    if len(vnv) > 0:
-        v = vnv.copy()
-        v["Category"] = v["Category"].astype(str)
-        pv = (
-            v.pivot_table(index="Date", columns="Category", values="Revenue", aggfunc="sum")
-            .fillna(0)
-            .sort_index()
-        )
-        fig2, ax2 = plt.subplots()
-        if pv.shape[0] <= 2:
-            pv.plot(kind="bar", ax=ax2)
-            ax2.set_xlabel("Date")
-        else:
-            for col in pv.columns:
-                ax2.plot(pd.to_datetime(pv.index), pv[col], marker="o", linewidth=2, label=col)
-        ax2.set_title("Revenue by Category (Veg vs Non-veg)")
-        ax2.set_ylabel("Revenue"); ax2.legend()
-        p2 = BytesIO(); plt.savefig(p2, format="png", bbox_inches="tight"); plt.close(fig2)
-        p2.seek(0); vnv_png = p2.read()
-
-    return xbuf.getvalue(), daily_png, vnv_png
+    return xbuf.getvalue()
 
 
-# -------- Single entry for the app --------
+# ---- Entry point for the app ----
 def run_pipeline(menu_csv, sales_csv):
     menu, sales = load_data(menu_csv, sales_csv)
     df, daily, vnv, top5 = pandas_phase(menu, sales)
     daily = numpy_phase(daily)
-    excel_bytes, daily_png, vnv_png = build_excel_and_charts(df, daily, vnv, top5)
+    excel_bytes = build_excel(df, daily, vnv, top5)
     return {
         "df": df,
         "daily": daily,
         "vnv": vnv,
         "top5": top5,
         "excel_bytes": excel_bytes,
-        "daily_png": daily_png,
-        "vnv_png": vnv_png,
     }
