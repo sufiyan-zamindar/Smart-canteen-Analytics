@@ -1,16 +1,18 @@
 # app.py
-# Streamlit UI. Runs Pandas -> NumPy -> Excel and serves charts + workbook.
-# Run: streamlit run app.py
+# Streamlit UI: uploads -> Pandas -> NumPy -> Excel, plus Altair charts
+# Run locally: streamlit run app.py
 
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import altair as alt
+
 from pipeline import run_pipeline
 
 st.set_page_config(page_title="Smart Canteen Analytics", page_icon="🍽️", layout="wide")
 
 st.title("🍽️ Smart Canteen Analytics — Auto Reports")
-st.caption("Upload new menu and sales CSVs. The app runs Pandas → NumPy → Excel and returns dashboards + a downloadable workbook.")
+st.caption("Upload Menu and Sales CSVs. The app runs Pandas → NumPy → Excel and returns dashboards + a downloadable workbook.")
 
 with st.sidebar:
     st.header("Upload files")
@@ -29,11 +31,12 @@ if run_btn:
         st.error(f"Processing error: {e}")
         st.stop()
 
+    df = result["df"]
     daily = result["daily"]
     vnv = result["vnv"]
     top5 = result["top5"]
 
-    # KPIs for latest day if present
+    # KPIs
     if len(daily) > 0:
         latest = daily.sort_values("Date").iloc[-1]
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -50,13 +53,49 @@ if run_btn:
     st.subheader("Top 5 Items per Day")
     st.dataframe(top5, use_container_width=True)
 
-    # Charts (bytes from pipeline)
+    # Charts via Altair (no matplotlib dependency)
     st.subheader("Charts")
     ch1, ch2 = st.columns(2)
-    if result["daily_png"]:
-        ch1.image(BytesIO(result["daily_png"]), caption="Daily Revenue", use_container_width=True)
-    if result["vnv_png"]:
-        ch2.image(BytesIO(result["vnv_png"]), caption="Veg vs Non-veg Revenue", use_container_width=True)
+
+    if len(daily) > 0:
+        d_sorted = daily.sort_values("Date").copy()
+        d_sorted["Date"] = pd.to_datetime(d_sorted["Date"])
+
+        # Fallback to bar when there are <= 2 dates
+        if len(d_sorted) <= 2:
+            chart1 = alt.Chart(d_sorted).mark_bar().encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Revenue:Q", title="Revenue"),
+                tooltip=["Date:T", "Revenue:Q", "Profit:Q", "Orders:Q", "UniqueStudents:Q"]
+            )
+        else:
+            chart1 = alt.Chart(d_sorted).mark_line(point=True).encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Revenue:Q", title="Revenue"),
+                tooltip=["Date:T", "Revenue:Q", "Profit:Q", "Orders:Q", "UniqueStudents:Q"]
+            )
+        ch1.altair_chart(chart1.properties(title="Daily Revenue").interactive(), use_container_width=True)
+
+    if len(vnv) > 0:
+        v2 = vnv.copy()
+        v2["Date"] = pd.to_datetime(v2["Date"])
+        # Pivot-like layered lines, fallback to grouped bars for small N
+        if v2["Date"].nunique() <= 2:
+            chart2 = alt.Chart(v2).mark_bar().encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Revenue:Q", title="Revenue"),
+                color=alt.Color("Category:N", title="Category"),
+                column=alt.Column("Category:N", title=None)
+            )
+        else:
+            chart2 = alt.Chart(v2).mark_line(point=True).encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Revenue:Q", title="Revenue"),
+                color=alt.Color("Category:N", title="Category"),
+                tooltip=["Date:T", "Category:N", "Revenue:Q"]
+            )
+        ch2.altair_chart(chart2.properties(title="Revenue by Category (Veg vs Non-veg)").interactive(),
+                         use_container_width=True)
 
     # Download Excel
     st.subheader("Download")
@@ -67,9 +106,8 @@ if run_btn:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    # Optional: show first rows of the joined table for quick QA
     with st.expander("Preview joined data"):
-        st.dataframe(result["df"].head(50), use_container_width=True)
+        st.dataframe(df.head(50), use_container_width=True)
 
 else:
     st.info("Upload menu and sales CSVs, then click Generate Reports.")
